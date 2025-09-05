@@ -16,6 +16,7 @@ from database import DatabaseManager
 from ai_agent import AIAgent
 from auth_models import UserCreate, UserLogin, UserResponse, Token
 from auth_service import AuthService, get_current_user
+from config import Config
 
 app = FastAPI(title="Cart Recovery AI", description="Agentic E-commerce Cart Recovery System")
 
@@ -55,6 +56,15 @@ class CartUpdate(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and start background tasks"""
+    # Validate configuration
+    try:
+        Config.validate_config()
+        print("✅ Configuration validated successfully")
+    except ValueError as e:
+        print(f"❌ Configuration error: {e}")
+        print("Please check your .env file and ensure all required variables are set")
+        raise
+    
     db.create_database_and_tables()
     db.connect()
     # Start background task for cart abandonment detection

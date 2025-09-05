@@ -1,6 +1,10 @@
 # Cart Recovery AI - Configuration
 import os
 from typing import Dict, Any
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 class Config:
     # Database Configuration
@@ -10,7 +14,7 @@ class Config:
     DB_NAME = os.getenv("DB_NAME", "cart_recovery_ai")
     
     # OpenRouter API Configuration
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
     OPENROUTER_MODEL = "deepseek/deepseek-chat-v3.1:free"
     
@@ -24,18 +28,40 @@ class Config:
     # Email Settings
     SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
     SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER = os.getenv("SMTP_USER", "chanith2019@gmail.com")
-    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "lpvdyufajsuahooe")
-    FROM_EMAIL = os.getenv("FROM_EMAIL", "chanith2019@gmail.com")
+    SMTP_USER = os.getenv("SMTP_USER")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+    FROM_EMAIL = os.getenv("FROM_EMAIL")
     
     # Security
-    SECRET_KEY = os.getenv("SECRET_KEY", "8dbae9405f346aa4fe1aee65fb1f6223e5439079b9faf3ddad12610631bf88ff")
+    SECRET_KEY = os.getenv("SECRET_KEY")
     JWT_ALGORITHM = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES = 30
     
     # Frontend URLs
     FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
     ADMIN_URL = os.getenv("ADMIN_URL", "http://localhost:8000/admin")
+    
+    @classmethod
+    def validate_config(cls):
+        """Validate that required environment variables are set"""
+        required_vars = [
+            "OPENROUTER_API_KEY",
+            "SECRET_KEY",
+        ]
+        
+        missing_vars = []
+        for var in required_vars:
+            if not getattr(cls, var):
+                missing_vars.append(var)
+        
+        if missing_vars:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+        
+        # Validate SECRET_KEY length
+        if len(cls.SECRET_KEY) < 32:
+            raise ValueError("SECRET_KEY must be at least 32 characters long")
+        
+        return True
     
     # AI Configuration
     AI_SETTINGS = {
