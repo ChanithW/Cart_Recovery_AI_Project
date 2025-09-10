@@ -168,6 +168,28 @@ class DatabaseManager:
             print(f"Error getting abandoned carts: {e}")
             return []
     
+    def get_abandoned_carts_analytics(self):
+        """Get carts that are already marked as abandoned for analytics"""
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            query = """
+                SELECT sc.*, u.email, 
+                       CONCAT(u.first_name, ' ', u.last_name) as name,
+                       GROUP_CONCAT(CONCAT(p.name, ' (', ci.quantity, ')') SEPARATOR ', ') as items
+                FROM shopping_carts sc
+                LEFT JOIN users u ON sc.user_id = u.id
+                LEFT JOIN cart_items ci ON sc.id = ci.cart_id
+                LEFT JOIN products p ON ci.product_id = p.id
+                WHERE sc.status = 'abandoned'
+                GROUP BY sc.id
+                ORDER BY sc.abandoned_at DESC
+            """
+            cursor.execute(query)
+            return cursor.fetchall()
+        except Error as e:
+            print(f"Error getting abandoned carts analytics: {e}")
+            return []
+    
     def mark_cart_abandoned(self, cart_id):
         """Mark a cart as abandoned"""
         try:

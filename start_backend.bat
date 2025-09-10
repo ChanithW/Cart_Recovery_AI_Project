@@ -2,10 +2,10 @@
 echo Starting Cart Recovery AI Backend...
 echo.
 
-cd /d "%~dp0\backend"
-
 echo Activating virtual environment...
-call .venv\Scripts\activate.bat
+call "%~dp0\.venv\Scripts\activate.bat"
+
+cd /d "%~dp0\backend"
 
 echo Installing/updating dependencies...
 pip install -r requirements.txt

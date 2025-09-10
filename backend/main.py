@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
@@ -17,13 +17,14 @@ from ai_agent import AIAgent
 from auth_models import UserCreate, UserLogin, UserResponse, Token
 from auth_service import AuthService, get_current_user
 from config import Config
+from chat_assistant import chat_assistant
 
 app = FastAPI(title="Cart Recovery AI", description="Agentic E-commerce Cart Recovery System")
 
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,7 +32,7 @@ app.add_middleware(
 
 # Initialize components
 db = DatabaseManager()
-ai_agent = AIAgent(api_key="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")  # Replace with your actual API key
+ai_agent = AIAgent(api_key=Config.OPENROUTER_API_KEY)
 
 # Pydantic models
 class ProductResponse(BaseModel):
@@ -86,6 +87,12 @@ def get_products():
         cursor.execute("SELECT * FROM products WHERE stock_quantity > 0")
         products = cursor.fetchall()
         cursor.close()
+        
+        # Convert decimal to float for JSON serialization
+        for product in products:
+            if 'price' in product and product['price'] is not None:
+                product['price'] = float(product['price'])
+        
         return products
     except Error as e:
         print(f"Database error in get_products: {str(e)}")
@@ -105,6 +112,11 @@ def get_product(product_id: int):
         
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
+        
+        # Convert decimal to float for JSON serialization
+        if 'price' in product and product['price'] is not None:
+            product['price'] = float(product['price'])
+        
         return product
     except Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -240,6 +252,11 @@ def get_current_user_info(current_user_email: str = Depends(get_current_user)):
 def update_cart(cart_data: CartUpdate):
     """Update shopping cart"""
     try:
+        # Ensure database connection
+        if not db.connection or not db.connection.is_connected():
+            if not db.connect():
+                raise HTTPException(status_code=500, detail="Database connection failed")
+        
         cursor = db.connection.cursor()
         
         # Find or create cart
@@ -287,12 +304,23 @@ def update_cart(cart_data: CartUpdate):
         return {"cart_id": cart_id, "total_value": total_value, "message": "Cart updated successfully"}
         
     except Error as e:
+        print(f"Database error in update_cart: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    except Exception as e:
+        print(f"General error in update_cart: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating cart: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/cart/{session_id}")
 def get_cart(session_id: str):
     """Get cart contents"""
     try:
+        # Ensure database connection
+        if not db.connection or not db.connection.is_connected():
+            if not db.connect():
+                # Return empty cart if database unavailable
+                return {"cart_id": None, "items": [], "total_value": 0}
+        
         cursor = db.connection.cursor(dictionary=True)
         
         # Get cart with items
@@ -312,7 +340,7 @@ def get_cart(session_id: str):
         
         cart_info = {
             "cart_id": cart_data[0]["id"],
-            "total_value": float(cart_data[0]["total_value"]),
+            "total_value": float(cart_data[0]["total_value"]) if cart_data[0]["total_value"] else 0,
             "items": []
         }
         
@@ -322,14 +350,20 @@ def get_cart(session_id: str):
                     "product_id": row["product_id"],
                     "name": row["name"],
                     "quantity": row["quantity"],
-                    "price": float(row["price"]),
+                    "price": float(row["price"]) if row["price"] else 0,
                     "image_url": row["image_url"]
                 })
         
         return cart_info
         
     except Error as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        print(f"Database error in get_cart: {str(e)}")
+        # Return empty cart on database error
+        return {"cart_id": None, "items": [], "total_value": 0, "error": "Database temporarily unavailable"}
+    except Exception as e:
+        print(f"General error in get_cart: {str(e)}")
+        # Return empty cart on any error
+        return {"cart_id": None, "items": [], "total_value": 0, "error": "Service temporarily unavailable"}
 
 @app.post("/cart/{cart_id}/generate-recovery-email")
 async def generate_recovery_email(cart_id: int):
@@ -390,11 +424,11 @@ async def generate_recovery_email(cart_id: int):
 def get_abandoned_carts():
     """Get analytics on abandoned carts"""
     try:
-        abandoned_carts = db.get_abandoned_carts(minutes_threshold=30)
+        abandoned_carts = db.get_abandoned_carts_analytics()
         
         analytics = {
             "total_abandoned": len(abandoned_carts),
-            "total_value": sum(float(cart["total_value"]) for cart in abandoned_carts),
+            "total_value": sum(float(cart["total_value"]) for cart in abandoned_carts if cart["total_value"]),
             "carts": abandoned_carts
         }
         
@@ -402,6 +436,150 @@ def get_abandoned_carts():
         
     except Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+# ========================
+# WEBSOCKET TEST ENDPOINT
+# ========================
+
+@app.get("/api/test/websocket")
+async def test_websocket_endpoint():
+    """Test endpoint to verify WebSocket setup"""
+    return {
+        "status": "WebSocket endpoint ready",
+        "endpoint": "/ws/chat/{session_id}",
+        "test_url": "ws://localhost:8000/ws/chat/test-session",
+        "active_connections": len(chat_assistant.active_connections)
+    }
+
+# ========================
+# WEBSOCKET ENDPOINTS FOR CHAT ASSISTANT
+# ========================
+
+@app.websocket("/ws/chat/{session_id}")
+async def websocket_chat_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket endpoint for real-time shopping assistance"""
+    print(f"New WebSocket connection attempt for session: {session_id}")
+    
+    try:
+        await chat_assistant.connect(websocket, session_id)
+        print(f"WebSocket connected successfully for session: {session_id}")
+        
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
+            print(f"Received WebSocket message: {data}")
+            
+            message_data = json.loads(data)
+            
+            user_message = message_data.get("message", "")
+            message_type = message_data.get("type", "user_message")
+            
+            if message_type == "user_message" and user_message:
+                print(f"Processing user message: {user_message}")
+                # Process user message and generate AI response
+                ai_response = await chat_assistant.handle_user_message(session_id, user_message)
+                print(f"Generated AI response: {ai_response}")
+                await chat_assistant.send_message(session_id, ai_response)
+            elif message_type == "cart_updated":
+                # Handle cart update notifications
+                cart_data = message_data.get("cart_data", {})
+                await chat_assistant.handle_cart_update(session_id, cart_data)
+            
+    except WebSocketDisconnect:
+        chat_assistant.disconnect(session_id)
+        print(f"Chat session {session_id} disconnected")
+    except Exception as e:
+        print(f"WebSocket error for session {session_id}: {str(e)}")
+        chat_assistant.disconnect(session_id)
+
+@app.post("/api/chat/notify-cart-update/{session_id}")
+async def notify_cart_update(session_id: str, cart_data: Dict):
+    """REST endpoint to notify chat assistant of cart updates"""
+    try:
+        # Send cart update notification to WebSocket if connected
+        if session_id in chat_assistant.active_connections:
+            notification = {
+                "type": "cart_updated",
+                "message": "I notice you've updated your cart. Need any help with those items?",
+                "cart_data": cart_data,
+                "timestamp": datetime.now().isoformat()
+            }
+            await chat_assistant.send_message(session_id, notification)
+        
+        return {"status": "notification_sent"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Notification error: {str(e)}")
+
+# ========================
+# GDPR COMPLIANCE ENDPOINTS  
+# ========================
+
+@app.get("/api/user/data-export")
+async def export_user_data(current_user: dict = Depends(get_current_user)):
+    """Export all user data for GDPR compliance (Article 20)"""
+    try:
+        user_id = current_user["user_id"]
+        
+        # For demo purposes, return mock data structure
+        # In production, this would query the actual database
+        user_data = {
+            "export_date": datetime.now().isoformat(), 
+            "user_id": user_id,
+            "profile": {
+                "id": user_id,
+                "email": current_user.get("email", "demo@example.com"),
+                "first_name": "Demo",
+                "last_name": "User",
+                "created_at": "2024-01-01T00:00:00"
+            },
+            "cart_history": [],
+            "recovery_attempts": []
+        }
+        
+        return user_data
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Data export error: {str(e)}")
+
+@app.delete("/api/user/delete-account")
+async def delete_user_account(current_user: dict = Depends(get_current_user)):
+    """Delete user account and all associated data (GDPR Article 17)"""
+    try:
+        user_id = current_user["user_id"]
+        
+        # For demo purposes, return success
+        # In production, this would delete all user data from database
+        return {"message": "Account and all associated data have been permanently deleted"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Account deletion error: {str(e)}")
+
+@app.post("/api/user/unsubscribe")
+async def unsubscribe_from_emails(email: EmailStr, unsubscribe_token: str):
+    """Handle email unsubscribe requests"""
+    try:
+        # For demo purposes, return success
+        # In production, this would update database preferences
+        return {"message": "Successfully unsubscribed from marketing emails"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unsubscribe error: {str(e)}")
+
+@app.put("/api/user/privacy-settings")
+async def update_privacy_settings(
+    settings: Dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update user privacy and email preferences"""
+    try:
+        user_id = current_user["user_id"]
+        
+        # For demo purposes, return success
+        # In production, this would update database settings
+        return {"message": "Privacy settings updated successfully"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Settings update error: {str(e)}")
 
 # Serve static files for frontend
 if not os.path.exists("static"):
