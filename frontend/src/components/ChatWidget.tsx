@@ -1,332 +1,208 @@
-import React, { useState, useEffect, useRef } from 'react';
-import './ChatWidget.css';
+import React, { useState, useRef, useEffect } from 'react';
+import axios from 'axios';
+
+const API_BASE = 'http://localhost:8000';
 
 interface ChatMessage {
-  type: string;
-  message: string;
-  timestamp: string;
+  id: string;
+  type: 'user' | 'bot';
+  content: string;
   suggestions?: string[];
-  offers?: any[];
-  product_suggestions?: any[];
-  cart_summary?: any;
-  next_actions?: string[];
-  recommendations?: any[];
+  timestamp: Date;
 }
 
-interface ChatWidgetProps {
-  sessionId: string;
-  isLoggedIn?: boolean;
+interface ChatResponse {
+  reply: string;
+  suggestions: string[];
+  session_id: string;
 }
 
-const ChatWidget: React.FC<ChatWidgetProps> = ({ sessionId }) => {
+const ChatWidget: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
-  const [isConnected, setIsConnected] = useState(false);
-  const [isTyping, setIsTyping] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
-  const connectWebSocket = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    // For development, use localhost:8000 for WebSocket connection
-    const wsUrl = `ws://localhost:8000/ws/chat/${sessionId}`;
-    
-    console.log('Connecting to WebSocket:', wsUrl);
-    wsRef.current = new WebSocket(wsUrl);
-
-    wsRef.current.onopen = () => {
-      console.log('Chat WebSocket connected successfully');
-      setIsConnected(true);
-    };
-
-    wsRef.current.onmessage = (event) => {
-      try {
-        console.log('Received WebSocket message:', event.data);
-        const messageData = JSON.parse(event.data);
-        setMessages(prev => [...prev, messageData]);
-        setIsTyping(false);
-      } catch (error) {
-        console.error('Error parsing WebSocket message:', error);
-      }
-    };
-
-    wsRef.current.onclose = (event) => {
-      console.log('Chat WebSocket disconnected. Code:', event.code, 'Reason:', event.reason);
-      setIsConnected(false);
-      // Attempt to reconnect after 3 seconds
-      setTimeout(() => {
-        if (isOpen) {
-          console.log('Attempting to reconnect...');
-          connectWebSocket();
-        }
-      }, 3000);
-    };
-
-    wsRef.current.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setIsConnected(false);
-    };
-  };
-
-  const disconnectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    setIsConnected(false);
-  };
-
-  const sendMessage = () => {
-    if (!inputMessage.trim() || !isConnected) return;
-
-    // Add user message to chat
-    const userMessage: ChatMessage = {
-      type: 'user_message',
-      message: inputMessage,
-      timestamp: new Date().toISOString()
-    };
-    
-    setMessages(prev => [...prev, userMessage]);
-    setIsTyping(true);
-
-    // Send to WebSocket
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      const messagePayload = {
-        type: 'user_message',
-        message: inputMessage
+  useEffect(() => {
+    if (isOpen && messages.length === 0) {
+      // Send welcome message when chat is first opened
+      const welcomeMessage: ChatMessage = {
+        id: 'welcome',
+        type: 'bot',
+        content: "Hi! I'm here to help you with your shopping. What can I assist you with today?",
+        suggestions: ["Show me products", "Any current deals?", "Help with my cart"],
+        timestamp: new Date()
       };
-      console.log('Sending message:', messagePayload);
-      wsRef.current.send(JSON.stringify(messagePayload));
-    } else {
-      console.error('WebSocket not connected, cannot send message');
-      setIsTyping(false);
+      setMessages([welcomeMessage]);
     }
+  }, [isOpen, messages.length]);
 
+  const sendMessage = async (messageText: string) => {
+    if (!messageText.trim()) return;
+
+    const userMessage: ChatMessage = {
+      id: Date.now().toString(),
+      type: 'user',
+      content: messageText,
+      timestamp: new Date()
+    };
+
+    setMessages(prev => [...prev, userMessage]);
     setInputMessage('');
+    setIsLoading(true);
+
+    try {
+      const sessionId = localStorage.getItem('sessionId') || `session_${Date.now()}`;
+      localStorage.setItem('sessionId', sessionId);
+
+      const response = await axios.post<ChatResponse>(`${API_BASE}/chat`, {
+        message: messageText,
+        session_id: sessionId,
+        context: {
+          page: window.location.pathname,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      const botMessage: ChatMessage = {
+        id: `bot_${Date.now()}`,
+        type: 'bot',
+        content: response.data.reply,
+        suggestions: response.data.suggestions,
+        timestamp: new Date()
+      };
+
+      setMessages(prev => [...prev, botMessage]);
+    } catch (error) {
+      console.error('Chat error:', error);
+      const errorMessage: ChatMessage = {
+        id: `error_${Date.now()}`,
+        type: 'bot',
+        content: "I'm sorry, I'm having trouble responding right now. Please try again in a moment.",
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    sendMessage(inputMessage);
   };
 
   const handleSuggestionClick = (suggestion: string) => {
-    setInputMessage(suggestion);
-    // Auto-send after a brief delay to update the input visually
-    setTimeout(() => {
-      if (suggestion.trim() && isConnected) {
-        // Add user message to chat
-        const userMessage: ChatMessage = {
-          type: 'user_message',
-          message: suggestion,
-          timestamp: new Date().toISOString()
-        };
-        
-        setMessages(prev => [...prev, userMessage]);
-        setIsTyping(true);
-
-        // Send to WebSocket
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          const messagePayload = {
-            type: 'user_message',
-            message: suggestion
-          };
-          console.log('Sending suggestion message:', messagePayload);
-          wsRef.current.send(JSON.stringify(messagePayload));
-        }
-        
-        setInputMessage('');
-      }
-    }, 100);
+    sendMessage(suggestion);
   };
 
-  const toggleChat = () => {
-    setIsOpen(!isOpen);
-    if (!isOpen) {
-      connectWebSocket();
-    } else {
-      disconnectWebSocket();
-    }
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  };
-
-  const formatTime = (timestamp: string) => {
-    return new Date(timestamp).toLocaleTimeString([], { 
-      hour: '2-digit', 
-      minute: '2-digit' 
-    });
-  };
-
-  const renderMessage = (msg: ChatMessage, index: number) => {
-    const isUser = msg.type === 'user_message';
-    
+  if (!isOpen) {
     return (
-      <div key={index} className={`message ${isUser ? 'user' : 'assistant'}`}>
-        <div className="message-content">
-          <p>{msg.message}</p>
-          
-          {/* Render suggestions */}
-          {msg.suggestions && msg.suggestions.length > 0 && (
-            <div className="suggestions">
-              {msg.suggestions.map((suggestion, idx) => (
-                <button
-                  key={idx}
-                  className="suggestion-btn"
-                  onClick={() => handleSuggestionClick(suggestion)}
-                >
-                  {suggestion}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Render offers */}
-          {msg.offers && msg.offers.length > 0 && (
-            <div className="offers">
-              <h4>Available Offers:</h4>
-              {msg.offers.map((offer, idx) => (
-                <div key={idx} className="offer-card">
-                  <strong>{offer.title}</strong>
-                  <p>{offer.description}</p>
-                  {offer.discount && <span className="discount">{offer.discount}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Render product recommendations */}
-          {msg.recommendations && msg.recommendations.length > 0 && (
-            <div className="recommendations">
-              <h4>Recommendations:</h4>
-              {msg.recommendations.map((rec, idx) => (
-                <div key={idx} className="recommendation-card">
-                  <strong>{rec.name}</strong>
-                  <p>{rec.reason}</p>
-                  {rec.price_range && <span className="price">{rec.price_range}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Render cart summary */}
-          {msg.cart_summary && (
-            <div className="cart-summary">
-              <h4>Cart Summary:</h4>
-              <p>Items: {msg.cart_summary.items?.length || 0}</p>
-              <p>Total: ${msg.cart_summary.total_value?.toFixed(2) || '0.00'}</p>
-            </div>
-          )}
-        </div>
-        <div className="message-time">{formatTime(msg.timestamp)}</div>
+      <div className="fixed bottom-4 right-4 z-50">
+        <button
+          onClick={() => setIsOpen(true)}
+          className="bg-blue-600 hover:bg-blue-700 text-white rounded-full p-4 shadow-lg transition-colors duration-200"
+          aria-label="Open chat"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+        </button>
       </div>
     );
-  };
+  }
 
   return (
-    <>
-      {/* Chat Toggle Button */}
-      <button 
-        className={`chat-toggle ${isOpen ? 'open' : ''}`}
-        onClick={toggleChat}
-        aria-label="Toggle chat"
-      >
-        {isOpen ? (
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="18" y1="6" x2="6" y2="18"></line>
-            <line x1="6" y1="6" x2="18" y2="18"></line>
+    <div className="fixed bottom-4 right-4 z-50 w-96 h-96 bg-white rounded-lg shadow-xl border">
+      {/* Header */}
+      <div className="bg-blue-600 text-white p-4 rounded-t-lg flex justify-between items-center">
+        <h3 className="font-medium">Shopping Assistant</h3>
+        <button
+          onClick={() => setIsOpen(false)}
+          className="text-white hover:text-gray-200"
+          aria-label="Close chat"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
           </svg>
-        ) : (
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="m3 21 1.9-5.7a8.5 8.5 0 1 1 3.8 3.8z"></path>
-          </svg>
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 p-4 h-64 overflow-y-auto">
+        {messages.map((message) => (
+          <div key={message.id} className={`mb-4 ${message.type === 'user' ? 'text-right' : 'text-left'}`}>
+            <div
+              className={`inline-block max-w-xs px-3 py-2 rounded-lg text-sm ${
+                message.type === 'user'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-800'
+              }`}
+            >
+              {message.content}
+            </div>
+            
+            {/* Suggestions */}
+            {message.type === 'bot' && message.suggestions && message.suggestions.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {message.suggestions.map((suggestion, index) => (
+                  <button
+                    key={index}
+                    onClick={() => handleSuggestionClick(suggestion)}
+                    className="block text-xs bg-gray-50 hover:bg-gray-100 text-gray-700 px-2 py-1 rounded border transition-colors duration-150"
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        
+        {isLoading && (
+          <div className="text-left">
+            <div className="inline-block bg-gray-100 text-gray-800 px-3 py-2 rounded-lg text-sm">
+              <div className="flex items-center space-x-1">
+                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+              </div>
+            </div>
+          </div>
         )}
-        {!isConnected && isOpen && <div className="connection-indicator offline"></div>}
-        {isConnected && <div className="connection-indicator online"></div>}
-      </button>
+        <div ref={messagesEndRef} />
+      </div>
 
-      {/* Chat Window */}
-      {isOpen && (
-        <div className="chat-widget">
-          <div className="chat-header">
-            <h3>Shopping Assistant</h3>
-            <div className="connection-status">
-              {isConnected ? (
-                <span className="status online">●</span>
-              ) : (
-                <span className="status offline">●</span>
-              )}
-            </div>
-          </div>
-
-          <div className="chat-messages">
-            {messages.length === 0 && (
-              <div className="welcome-message">
-                <p>👋 Hi! I'm your shopping assistant. How can I help you today?</p>
-                <div className="quick-actions">
-                  <button onClick={() => handleSuggestionClick("Show recommendations")}>
-                    Show recommendations
-                  </button>
-                  <button onClick={() => handleSuggestionClick("Check my cart")}>
-                    Check my cart
-                  </button>
-                  <button onClick={() => handleSuggestionClick("Find deals")}>
-                    Find deals
-                  </button>
-                </div>
-              </div>
-            )}
-            
-            {messages.map((msg, index) => renderMessage(msg, index))}
-            
-            {isTyping && (
-              <div className="typing-indicator">
-                <div className="typing-dots">
-                  <span></span>
-                  <span></span>
-                  <span></span>
-                </div>
-                <span>Assistant is typing...</span>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-
-          <div className="chat-input">
-            <div className="input-container">
-              <textarea
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder={isConnected ? "Type your message..." : "Connecting..."}
-                disabled={!isConnected}
-                rows={1}
-              />
-              <button 
-                onClick={sendMessage}
-                disabled={!inputMessage.trim() || !isConnected}
-                className="send-btn"
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="22" y1="2" x2="11" y2="13"></line>
-                  <polygon points="22,2 15,22 11,13 2,9 22,2"></polygon>
-                </svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+      {/* Input */}
+      <div className="p-4 border-t">
+        <form onSubmit={handleSubmit} className="flex space-x-2">
+          <input
+            type="text"
+            value={inputMessage}
+            onChange={(e) => setInputMessage(e.target.value)}
+            placeholder="Ask me anything..."
+            className="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            disabled={isLoading}
+          />
+          <button
+            type="submit"
+            disabled={isLoading || !inputMessage.trim()}
+            className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white px-4 py-2 rounded-md text-sm transition-colors duration-200"
+          >
+            Send
+          </button>
+        </form>
+      </div>
+    </div>
   );
 };
 

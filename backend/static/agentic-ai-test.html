@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Behavior Tracking Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        button { padding: 10px 15px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .results { background: #f8f9fa; padding: 10px; margin-top: 10px; border-radius: 3px; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>🧪 Agentic AI Behavior Tracking Test</h1>
+    
+    <div class="test-section">
+        <h3>Behavior Tracking</h3>
+        <button onclick="trackProductView()">Track Product View</button>
+        <button onclick="trackCartAdd()">Track Cart Add</button>
+        <button onclick="trackCheckoutStart()">Track Checkout Start</button>
+        <button onclick="trackExitIntent()">Track Exit Intent</button>
+        <div id="trackingResults" class="results"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>AI Chat Test</h3>
+        <input type="text" id="chatInput" placeholder="Ask me anything..." style="width: 300px; padding: 10px;">
+        <button onclick="testChat()">Send to AI</button>
+        <div id="chatResults" class="results"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>Behavior Analysis</h3>
+        <button onclick="getAnalysis()">Get AI Abandonment Analysis</button>
+        <div id="analysisResults" class="results"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>Promotion Recommendations</h3>
+        <button onclick="getPromotions()">Get Relevant Promotions</button>
+        <div id="promotionResults" class="results"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        const sessionId = `test_session_${Date.now()}`;
+        
+        async function trackEvent(eventType, eventData = {}) {
+            try {
+                const response = await fetch(`${API_BASE}/behavior/track`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        event_type: eventType,
+                        event_data: eventData,
+                        page_url: window.location.pathname
+                    })
+                });
+                
+                const result = await response.json();
+                document.getElementById('trackingResults').innerHTML = 
+                    `<span class="success">✅ Tracked: ${eventType} - ${result.message}</span>`;
+            } catch (error) {
+                document.getElementById('trackingResults').innerHTML = 
+                    `<span class="error">❌ Error: ${error.message}</span>`;
+            }
+        }
+
+        function trackProductView() {
+            trackEvent('product_view', { product_id: 1, product_name: 'Wireless Headphones' });
+        }
+
+        function trackCartAdd() {
+            trackEvent('cart_add', { product_id: 1, quantity: 2, product_name: 'Wireless Headphones' });
+        }
+
+        function trackCheckoutStart() {
+            trackEvent('checkout_start', { cart_value: 199.99, item_count: 2 });
+        }
+
+        function trackExitIntent() {
+            trackEvent('exit_intent', { page: window.location.pathname });
+        }
+
+        async function testChat() {
+            const message = document.getElementById('chatInput').value;
+            if (!message) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId,
+                        context: { page: 'test_page' }
+                    })
+                });
+                
+                const result = await response.json();
+                document.getElementById('chatResults').innerHTML = 
+                    `<div class="success">
+                        <strong>AI Reply:</strong> ${result.reply}<br>
+                        <strong>Suggestions:</strong> ${result.suggestions.join(', ')}
+                    </div>`;
+            } catch (error) {
+                document.getElementById('chatResults').innerHTML = 
+                    `<span class="error">❌ Chat Error: ${error.message}</span>`;
+            }
+        }
+
+        async function getAnalysis() {
+            try {
+                const response = await fetch(`${API_BASE}/behavior/analyze/${sessionId}`);
+                const result = await response.json();
+                
+                document.getElementById('analysisResults').innerHTML = 
+                    `<div class="success">
+                        <strong>Analysis Results:</strong><br>
+                        Events Tracked: ${result.behavior_events_count}<br>
+                        Primary Reason: ${result.analysis?.primary_reason || 'N/A'}<br>
+                        Intent Level: ${result.analysis?.intent_level || 'N/A'}<br>
+                        Recovery Timing: ${result.analysis?.recovery_timing_hours || 'N/A'} hours<br>
+                        Conversion Likelihood: ${result.analysis?.conversion_likelihood || 'N/A'}%
+                    </div>`;
+            } catch (error) {
+                document.getElementById('analysisResults').innerHTML = 
+                    `<span class="error">❌ Analysis Error: ${error.message}</span>`;
+            }
+        }
+
+        async function getPromotions() {
+            try {
+                const response = await fetch(`${API_BASE}/promotions/relevant?cart_value=150&categories=Electronics`);
+                const result = await response.json();
+                
+                let promotionsHtml = `<div class="success"><strong>Found ${result.count} Relevant Promotions:</strong><br>`;
+                result.promotions.forEach(promo => {
+                    promotionsHtml += `• ${promo.name}: ${promo.description} (${promo.discount_value}% off)<br>`;
+                });
+                promotionsHtml += '</div>';
+                
+                document.getElementById('promotionResults').innerHTML = promotionsHtml;
+            } catch (error) {
+                document.getElementById('promotionResults').innerHTML = 
+                    `<span class="error">❌ Promotions Error: ${error.message}</span>`;
+            }
+        }
+
+        // Auto-track page view on load
+        window.onload = () => {
+            trackEvent('page_view', { page: 'test_page' });
+        };
+    </script>
+</body>
+</html>

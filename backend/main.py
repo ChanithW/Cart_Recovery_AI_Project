@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
@@ -11,20 +11,20 @@ import json
 import asyncio
 from datetime import datetime, timedelta
 import os
+import traceback
 
 from database import DatabaseManager
 from ai_agent import AIAgent
 from auth_models import UserCreate, UserLogin, UserResponse, Token
 from auth_service import AuthService, get_current_user
 from config import Config
-from chat_assistant import chat_assistant
 
 app = FastAPI(title="Cart Recovery AI", description="Agentic E-commerce Cart Recovery System")
 
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -32,6 +32,7 @@ app.add_middleware(
 
 # Initialize components
 db = DatabaseManager()
+# Initialize AI agent with the API key from environment/config (do NOT hardcode keys in source)
 ai_agent = AIAgent(api_key=Config.OPENROUTER_API_KEY)
 
 # Pydantic models
@@ -52,6 +53,22 @@ class CartUpdate(BaseModel):
     user_id: Optional[int] = None
     session_id: str
     items: List[CartItem]
+
+class ChatMessage(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    context: Optional[Dict] = None
+
+class ChatResponse(BaseModel):
+    reply: str
+    suggestions: List[str] = []
+    session_id: str
+
+class BehaviorTrackingRequest(BaseModel):
+    session_id: str
+    event_type: str
+    event_data: Optional[Dict] = None
+    page_url: Optional[str] = None
 
 # Startup event
 @app.on_event("startup")
@@ -87,18 +104,26 @@ def get_products():
         cursor.execute("SELECT * FROM products WHERE stock_quantity > 0")
         products = cursor.fetchall()
         cursor.close()
-        
-        # Convert decimal to float for JSON serialization
-        for product in products:
-            if 'price' in product and product['price'] is not None:
-                product['price'] = float(product['price'])
-        
+        # Defensive serialization: convert DECIMAL/bytearray types to native Python
+        for p in products:
+            # price may be Decimal or bytearray depending on connector/config
+            if 'price' in p and p['price'] is not None:
+                try:
+                    p['price'] = float(p['price'])
+                except Exception:
+                    try:
+                        # handle bytearray or other unexpected types
+                        p['price'] = float(bytes(p['price']).decode())
+                    except Exception:
+                        p['price'] = None
         return products
     except Error as e:
         print(f"Database error in get_products: {str(e)}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     except Exception as e:
         print(f"Unexpected error in get_products: {str(e)}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 @app.get("/products/{product_id}", response_model=ProductResponse)
@@ -112,13 +137,20 @@ def get_product(product_id: int):
         
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
-        
-        # Convert decimal to float for JSON serialization
+
+        # Defensive serialization for single product
         if 'price' in product and product['price'] is not None:
-            product['price'] = float(product['price'])
-        
+            try:
+                product['price'] = float(product['price'])
+            except Exception:
+                try:
+                    product['price'] = float(bytes(product['price']).decode())
+                except Exception:
+                    product['price'] = None
+
         return product
     except Error as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 # Authentication Routes
@@ -252,11 +284,6 @@ def get_current_user_info(current_user_email: str = Depends(get_current_user)):
 def update_cart(cart_data: CartUpdate):
     """Update shopping cart"""
     try:
-        # Ensure database connection
-        if not db.connection or not db.connection.is_connected():
-            if not db.connect():
-                raise HTTPException(status_code=500, detail="Database connection failed")
-        
         cursor = db.connection.cursor()
         
         # Find or create cart
@@ -304,23 +331,12 @@ def update_cart(cart_data: CartUpdate):
         return {"cart_id": cart_id, "total_value": total_value, "message": "Cart updated successfully"}
         
     except Error as e:
-        print(f"Database error in update_cart: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    except Exception as e:
-        print(f"General error in update_cart: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating cart: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/cart/{session_id}")
 def get_cart(session_id: str):
     """Get cart contents"""
     try:
-        # Ensure database connection
-        if not db.connection or not db.connection.is_connected():
-            if not db.connect():
-                # Return empty cart if database unavailable
-                return {"cart_id": None, "items": [], "total_value": 0}
-        
         cursor = db.connection.cursor(dictionary=True)
         
         # Get cart with items
@@ -340,7 +356,7 @@ def get_cart(session_id: str):
         
         cart_info = {
             "cart_id": cart_data[0]["id"],
-            "total_value": float(cart_data[0]["total_value"]) if cart_data[0]["total_value"] else 0,
+            "total_value": float(cart_data[0]["total_value"]),
             "items": []
         }
         
@@ -350,20 +366,14 @@ def get_cart(session_id: str):
                     "product_id": row["product_id"],
                     "name": row["name"],
                     "quantity": row["quantity"],
-                    "price": float(row["price"]) if row["price"] else 0,
+                    "price": float(row["price"]),
                     "image_url": row["image_url"]
                 })
         
         return cart_info
         
     except Error as e:
-        print(f"Database error in get_cart: {str(e)}")
-        # Return empty cart on database error
-        return {"cart_id": None, "items": [], "total_value": 0, "error": "Database temporarily unavailable"}
-    except Exception as e:
-        print(f"General error in get_cart: {str(e)}")
-        # Return empty cart on any error
-        return {"cart_id": None, "items": [], "total_value": 0, "error": "Service temporarily unavailable"}
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/cart/{cart_id}/generate-recovery-email")
 async def generate_recovery_email(cart_id: int):
@@ -373,8 +383,7 @@ async def generate_recovery_email(cart_id: int):
         
         # Get cart details
         cursor.execute("""
-            SELECT sc.*, u.email, 
-                   CONCAT(u.first_name, ' ', u.last_name) as name,
+            SELECT sc.*, u.email,
                    GROUP_CONCAT(CONCAT(p.name, ' (', ci.quantity, ')') SEPARATOR ', ') as items
             FROM shopping_carts sc
             LEFT JOIN users u ON sc.user_id = u.id
@@ -387,18 +396,38 @@ async def generate_recovery_email(cart_id: int):
         cart = cursor.fetchone()
         if not cart:
             raise HTTPException(status_code=404, detail="Cart not found")
-        
+
+        # Resolve user/display name safely (avoid assuming DB columns exist)
+        user_name = None
+        try:
+            if cart.get('user_id'):
+                user_row = db.get_user_by_id(cart.get('user_id'))
+                if user_row:
+                    # Prefer first/last name if present, else fall back to email
+                    fn = user_row.get('first_name') if isinstance(user_row, dict) else None
+                    ln = user_row.get('last_name') if isinstance(user_row, dict) else None
+                    if fn or ln:
+                        user_name = f"{fn or ''} {ln or ''}".strip()
+                    else:
+                        user_name = user_row.get('email') if isinstance(user_row, dict) else None
+        except Exception:
+            user_name = None
+
+        if not user_name:
+            user_name = cart.get('email') or 'Valued Customer'
+
         # Generate email using AI
         email_content = ai_agent.generate_recovery_email(
-            user_name=cart["name"] or "Valued Customer",
-            cart_items=cart["items"] or "your selected items",
-            cart_value=float(cart["total_value"])
+            user_name=user_name,
+            cart_items=cart.get('items') or "your selected items",
+            cart_value=float(cart.get('total_value') or 0)
         )
         
-        # Generate offer
+        # Generate offer using enhanced IR system
         offer = ai_agent.suggest_offers(
-            cart_items=cart["items"] or "your items",
-            cart_value=float(cart["total_value"])
+            cart_items=cart.get('items') or "your items",
+            cart_value=float(cart.get('total_value') or 0),
+            db_manager=db
         )
         
         # Save recovery attempt
@@ -424,11 +453,11 @@ async def generate_recovery_email(cart_id: int):
 def get_abandoned_carts():
     """Get analytics on abandoned carts"""
     try:
-        abandoned_carts = db.get_abandoned_carts_analytics()
+        abandoned_carts = db.get_abandoned_carts(minutes_threshold=30)
         
         analytics = {
             "total_abandoned": len(abandoned_carts),
-            "total_value": sum(float(cart["total_value"]) for cart in abandoned_carts if cart["total_value"]),
+            "total_value": sum(float(cart["total_value"]) for cart in abandoned_carts),
             "carts": abandoned_carts
         }
         
@@ -437,149 +466,249 @@ def get_abandoned_carts():
     except Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-# ========================
-# WEBSOCKET TEST ENDPOINT
-# ========================
-
-@app.get("/api/test/websocket")
-async def test_websocket_endpoint():
-    """Test endpoint to verify WebSocket setup"""
-    return {
-        "status": "WebSocket endpoint ready",
-        "endpoint": "/ws/chat/{session_id}",
-        "test_url": "ws://localhost:8000/ws/chat/test-session",
-        "active_connections": len(chat_assistant.active_connections)
-    }
-
-# ========================
-# WEBSOCKET ENDPOINTS FOR CHAT ASSISTANT
-# ========================
-
-@app.websocket("/ws/chat/{session_id}")
-async def websocket_chat_endpoint(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint for real-time shopping assistance"""
-    print(f"New WebSocket connection attempt for session: {session_id}")
-    
+@app.post("/chat", response_model=ChatResponse)
+async def chat_with_ai(chat_data: ChatMessage):
+    """Conversational AI endpoint for customer support and product recommendations"""
     try:
-        await chat_assistant.connect(websocket, session_id)
-        print(f"WebSocket connected successfully for session: {session_id}")
+        # Get session context (cart, user info if available)
+        context_info = ""
+        if chat_data.session_id:
+            try:
+                cursor = db.connection.cursor(dictionary=True)
+                cursor.execute("""
+                    SELECT sc.total_value, 
+                           GROUP_CONCAT(CONCAT(p.name, ' (', ci.quantity, ')') SEPARATOR ', ') as cart_items
+                    FROM shopping_carts sc
+                    LEFT JOIN cart_items ci ON sc.id = ci.cart_id
+                    LEFT JOIN products p ON ci.product_id = p.id
+                    WHERE sc.session_id = %s AND sc.status = 'active'
+                    GROUP BY sc.id
+                """, (chat_data.session_id,))
+                cart_info = cursor.fetchone()
+                cursor.close()
+                
+                if cart_info and cart_info['cart_items']:
+                    context_info = f"User has items in cart: {cart_info['cart_items']} (Total: ${float(cart_info['total_value']):.2f})"
+            except Exception:
+                context_info = ""
         
-        while True:
-            # Receive message from client
-            data = await websocket.receive_text()
-            print(f"Received WebSocket message: {data}")
+        # Build conversational prompt
+        prompt = f"""
+        You are a helpful e-commerce assistant for an online store. Answer the customer's question helpfully and naturally.
+        
+        Customer message: {chat_data.message}
+        
+        Context: {context_info or "No current cart items"}
+        Additional context: {json.dumps(chat_data.context) if chat_data.context else "None"}
+        
+        Guidelines:
+        - Be friendly and helpful
+        - If they ask about products, suggest browsing our categories: Electronics, Sports, Home, Accessories
+        - If they have cart items, you can reference them
+        - If they ask about discounts/offers, mention we have cart recovery offers
+        - Keep responses concise but informative
+        - If you can't answer something specific, offer to help them find what they need
+        
+        Respond in a natural, conversational way. If appropriate, suggest 2-3 follow-up questions they might have.
+        """
+        
+        try:
+            completion = ai_agent.client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "cart-recovery-ai.com",
+                    "X-Title": "Cart Recovery AI",
+                },
+                model="deepseek/deepseek-chat-v3.1:free",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a helpful e-commerce customer service assistant. Be friendly, concise, and helpful."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            )
             
-            message_data = json.loads(data)
+            ai_reply = completion.choices[0].message.content
             
-            user_message = message_data.get("message", "")
-            message_type = message_data.get("type", "user_message")
+            # Generate simple follow-up suggestions based on the conversation
+            suggestions = []
+            message_lower = chat_data.message.lower()
+            if "product" in message_lower or "buy" in message_lower:
+                suggestions = ["What categories do you have?", "Do you have any deals?", "How do I checkout?"]
+            elif "price" in message_lower or "cost" in message_lower:
+                suggestions = ["Do you offer discounts?", "What about shipping costs?", "Any promo codes?"]
+            elif "shipping" in message_lower:
+                suggestions = ["How long does delivery take?", "Do you ship internationally?", "What's your return policy?"]
+            else:
+                suggestions = ["Tell me about your products", "Do you have customer support?", "How do I place an order?"]
             
-            if message_type == "user_message" and user_message:
-                print(f"Processing user message: {user_message}")
-                # Process user message and generate AI response
-                ai_response = await chat_assistant.handle_user_message(session_id, user_message)
-                print(f"Generated AI response: {ai_response}")
-                await chat_assistant.send_message(session_id, ai_response)
-            elif message_type == "cart_updated":
-                # Handle cart update notifications
-                cart_data = message_data.get("cart_data", {})
-                await chat_assistant.handle_cart_update(session_id, cart_data)
-            
-    except WebSocketDisconnect:
-        chat_assistant.disconnect(session_id)
-        print(f"Chat session {session_id} disconnected")
+        except Exception as e:
+            # Fallback response if AI fails
+            ai_reply = "I'm here to help you with your shopping! You can browse our products, ask about our current offers, or get help with your order. What would you like to know?"
+            suggestions = ["Show me products", "Any current deals?", "Help with my cart"]
+            print(f"Chat AI error: {e}")
+        
+        return ChatResponse(
+            reply=ai_reply,
+            suggestions=suggestions[:3],  # Limit to 3 suggestions
+            session_id=chat_data.session_id or "anonymous"
+        )
+        
     except Exception as e:
-        print(f"WebSocket error for session {session_id}: {str(e)}")
-        chat_assistant.disconnect(session_id)
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
-@app.post("/api/chat/notify-cart-update/{session_id}")
-async def notify_cart_update(session_id: str, cart_data: Dict):
-    """REST endpoint to notify chat assistant of cart updates"""
+@app.delete("/users/{user_id}/data")
+def delete_user_data(user_id: int, anonymize_only: bool = True, current_user_email: str = Depends(get_current_user)):
+    """GDPR: Delete or anonymize user data"""
     try:
-        # Send cart update notification to WebSocket if connected
-        if session_id in chat_assistant.active_connections:
-            notification = {
-                "type": "cart_updated",
-                "message": "I notice you've updated your cart. Need any help with those items?",
-                "cart_data": cart_data,
-                "timestamp": datetime.now().isoformat()
+        # Verify user can delete this data (admin or own data)
+        current_user = db.get_user_by_email(current_user_email)
+        target_user = db.get_user_by_id(user_id)
+        
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Only allow deletion of own data (or implement admin check)
+        if current_user['id'] != user_id:
+            raise HTTPException(status_code=403, detail="Cannot delete other user's data")
+        
+        success = db.delete_user_data(user_id, keep_anonymous=anonymize_only)
+        
+        if success:
+            return {
+                "message": f"User data {'anonymized' if anonymize_only else 'deleted'} successfully",
+                "user_id": user_id,
+                "anonymized": anonymize_only
             }
-            await chat_assistant.send_message(session_id, notification)
-        
-        return {"status": "notification_sent"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete user data")
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Notification error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting user data: {str(e)}")
 
-# ========================
-# GDPR COMPLIANCE ENDPOINTS  
-# ========================
-
-@app.get("/api/user/data-export")
-async def export_user_data(current_user: dict = Depends(get_current_user)):
-    """Export all user data for GDPR compliance (Article 20)"""
+@app.put("/users/{user_id}/preferences")
+def update_user_preferences(
+    user_id: int, 
+    email_notifications: bool = True,
+    marketing_emails: bool = True, 
+    data_processing_consent: bool = True,
+    current_user_email: str = Depends(get_current_user)
+):
+    """Update user preferences for GDPR compliance"""
     try:
-        user_id = current_user["user_id"]
+        current_user = db.get_user_by_email(current_user_email)
         
-        # For demo purposes, return mock data structure
-        # In production, this would query the actual database
-        user_data = {
-            "export_date": datetime.now().isoformat(), 
-            "user_id": user_id,
-            "profile": {
-                "id": user_id,
-                "email": current_user.get("email", "demo@example.com"),
-                "first_name": "Demo",
-                "last_name": "User",
-                "created_at": "2024-01-01T00:00:00"
-            },
-            "cart_history": [],
-            "recovery_attempts": []
+        # Only allow updating own preferences
+        if current_user['id'] != user_id:
+            raise HTTPException(status_code=403, detail="Cannot update other user's preferences")
+        
+        pref_id = db.create_user_preferences(
+            user_id=user_id,
+            email_notifications=email_notifications,
+            marketing_emails=marketing_emails,
+            data_processing_consent=data_processing_consent
+        )
+        
+        return {
+            "message": "Preferences updated successfully",
+            "preference_id": pref_id,
+            "email_notifications": email_notifications,
+            "marketing_emails": marketing_emails,
+            "data_processing_consent": data_processing_consent
         }
         
-        return user_data
-        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Data export error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating preferences: {str(e)}")
 
-@app.delete("/api/user/delete-account")
-async def delete_user_account(current_user: dict = Depends(get_current_user)):
-    """Delete user account and all associated data (GDPR Article 17)"""
+@app.post("/behavior/track")
+def track_behavior(request: BehaviorTrackingRequest):
+    """Track user behavior for NLP abandonment analysis"""
     try:
-        user_id = current_user["user_id"]
+        valid_events = ['page_view', 'product_view', 'cart_add', 'cart_remove', 'checkout_start', 'payment_attempt', 'exit_intent']
         
-        # For demo purposes, return success
-        # In production, this would delete all user data from database
-        return {"message": "Account and all associated data have been permanently deleted"}
+        if request.event_type not in valid_events:
+            raise HTTPException(status_code=400, detail=f"Invalid event type. Must be one of: {valid_events}")
         
+        behavior_id = db.track_user_behavior(
+            session_id=request.session_id,
+            event_type=request.event_type,
+            event_data=request.event_data,
+            page_url=request.page_url
+        )
+        
+        return {
+            "message": "Behavior tracked successfully",
+            "behavior_id": behavior_id,
+            "session_id": request.session_id,
+            "event_type": request.event_type
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Account deletion error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error tracking behavior: {str(e)}")
 
-@app.post("/api/user/unsubscribe")
-async def unsubscribe_from_emails(email: EmailStr, unsubscribe_token: str):
-    """Handle email unsubscribe requests"""
+@app.get("/behavior/analyze/{session_id}")
+def analyze_abandonment_behavior(session_id: str):
+    """Analyze user behavior for abandonment insights"""
     try:
-        # For demo purposes, return success
-        # In production, this would update database preferences
-        return {"message": "Successfully unsubscribed from marketing emails"}
+        # Get behavior data
+        behavior_data = db.get_user_behavior_pattern(session_id)
+        
+        # Get cart info for context
+        cursor = db.connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT GROUP_CONCAT(CONCAT(p.name, ' (', ci.quantity, ')') SEPARATOR ', ') as items
+            FROM shopping_carts sc
+            LEFT JOIN cart_items ci ON sc.id = ci.cart_id
+            LEFT JOIN products p ON ci.product_id = p.id
+            WHERE sc.session_id = %s AND sc.status = 'active'
+            GROUP BY sc.id
+        """, (session_id,))
+        cart_info = cursor.fetchone()
+        cursor.close()
+        
+        cart_items = cart_info['items'] if cart_info else "No cart items"
+        
+        # Use enhanced NLP analysis
+        analysis = ai_agent.analyze_abandonment_with_nlp(cart_items, behavior_data)
+        
+        return {
+            "session_id": session_id,
+            "behavior_events_count": len(behavior_data),
+            "analysis": analysis,
+            "cart_items": cart_items
+        }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unsubscribe error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error analyzing behavior: {str(e)}")
 
-@app.put("/api/user/privacy-settings")
-async def update_privacy_settings(
-    settings: Dict,
-    current_user: dict = Depends(get_current_user)
-):
-    """Update user privacy and email preferences"""
+@app.get("/promotions/relevant")
+def get_relevant_promotions(cart_value: float = 0, categories: Optional[str] = None):
+    """Get relevant promotions using IR system"""
     try:
-        user_id = current_user["user_id"]
+        category_list = categories.split(',') if categories else None
+        promotions = db.get_relevant_promotions(
+            cart_value=cart_value,
+            categories=category_list
+        )
         
-        # For demo purposes, return success
-        # In production, this would update database settings
-        return {"message": "Privacy settings updated successfully"}
+        return {
+            "promotions": promotions,
+            "count": len(promotions),
+            "cart_value": cart_value,
+            "categories": category_list
+        }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Settings update error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting promotions: {str(e)}")
 
 # Serve static files for frontend
 if not os.path.exists("static"):

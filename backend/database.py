@@ -117,6 +117,73 @@ class DatabaseManager:
                 )
             """)
             
+            # Promotions table for IR system
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS promotions (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    promotion_type ENUM('percentage_discount', 'fixed_discount', 'free_shipping', 'buy_one_get_one') DEFAULT 'percentage_discount',
+                    discount_value DECIMAL(10, 2),
+                    min_cart_value DECIMAL(10, 2) DEFAULT 0,
+                    applicable_categories TEXT,
+                    applicable_products TEXT,
+                    start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    end_date TIMESTAMP NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    priority INT DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # User preferences for GDPR and personalization
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT,
+                    email_notifications BOOLEAN DEFAULT TRUE,
+                    sms_notifications BOOLEAN DEFAULT FALSE,
+                    marketing_emails BOOLEAN DEFAULT TRUE,
+                    data_processing_consent BOOLEAN DEFAULT TRUE,
+                    preference_data JSON,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # NLP behavior tracking for abandonment detection
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_behavior (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    session_id VARCHAR(255),
+                    user_id INT NULL,
+                    event_type ENUM('page_view', 'product_view', 'cart_add', 'cart_remove', 'checkout_start', 'payment_attempt', 'exit_intent') NOT NULL,
+                    event_data JSON,
+                    page_url VARCHAR(500),
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_session_time (session_id, timestamp),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+                )
+            """)
+            
+            # Insert sample promotions if none exist
+            cursor.execute("SELECT COUNT(*) FROM promotions")
+            if cursor.fetchone()[0] == 0:
+                sample_promotions = [
+                    ("Welcome10", "10% off for new customers", "percentage_discount", 10.00, 50.00, "", "", None, True, 1),
+                    ("Free Shipping", "Free shipping on orders over $100", "free_shipping", 0.00, 100.00, "", "", None, True, 2),
+                    ("Electronics20", "20% off all electronics", "percentage_discount", 20.00, 0.00, "Electronics", "", None, True, 1),
+                    ("Sports15", "15% off sports equipment", "percentage_discount", 15.00, 0.00, "Sports", "", None, True, 1),
+                    ("Cart Recovery Special", "Special offer for returning customers", "percentage_discount", 12.00, 25.00, "", "", None, True, 3)
+                ]
+                
+                insert_promotions = """
+                    INSERT INTO promotions (name, description, promotion_type, discount_value, min_cart_value, applicable_categories, applicable_products, end_date, is_active, priority)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                cursor.executemany(insert_promotions, sample_promotions)
+            
             # Insert sample products
             sample_products = [
                 ("Wireless Headphones", "High-quality wireless headphones with noise cancellation", 199.99, "https://images.unsplash.com/photo-1505740420928-5e560c06d30e", 50, "Electronics"),
@@ -168,28 +235,6 @@ class DatabaseManager:
             print(f"Error getting abandoned carts: {e}")
             return []
     
-    def get_abandoned_carts_analytics(self):
-        """Get carts that are already marked as abandoned for analytics"""
-        try:
-            cursor = self.connection.cursor(dictionary=True)
-            query = """
-                SELECT sc.*, u.email, 
-                       CONCAT(u.first_name, ' ', u.last_name) as name,
-                       GROUP_CONCAT(CONCAT(p.name, ' (', ci.quantity, ')') SEPARATOR ', ') as items
-                FROM shopping_carts sc
-                LEFT JOIN users u ON sc.user_id = u.id
-                LEFT JOIN cart_items ci ON sc.id = ci.cart_id
-                LEFT JOIN products p ON ci.product_id = p.id
-                WHERE sc.status = 'abandoned'
-                GROUP BY sc.id
-                ORDER BY sc.abandoned_at DESC
-            """
-            cursor.execute(query)
-            return cursor.fetchall()
-        except Error as e:
-            print(f"Error getting abandoned carts analytics: {e}")
-            return []
-    
     def mark_cart_abandoned(self, cart_id):
         """Mark a cart as abandoned"""
         try:
@@ -236,6 +281,155 @@ class DatabaseManager:
         except Error as e:
             print(f"Error getting user by ID: {e}")
             return None
+    
+    def get_relevant_promotions(self, cart_value=0, categories=None, product_ids=None):
+        """IR: Get relevant promotions based on cart context"""
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            
+            # Base query for active promotions
+            query = """
+                SELECT * FROM promotions 
+                WHERE is_active = TRUE 
+                AND (end_date IS NULL OR end_date > NOW())
+                AND min_cart_value <= %s
+            """
+            params = [cart_value]
+            
+            # Add category filter if provided
+            if categories:
+                category_conditions = []
+                for category in categories:
+                    category_conditions.append("applicable_categories LIKE %s OR applicable_categories = ''")
+                    params.append(f"%{category}%")
+                
+                if category_conditions:
+                    query += f" AND ({' OR '.join(category_conditions)})"
+            
+            query += " ORDER BY priority ASC, discount_value DESC LIMIT 5"
+            
+            cursor.execute(query, params)
+            return cursor.fetchall()
+        except Error as e:
+            print(f"Error getting promotions: {e}")
+            return []
+    
+    def get_recommended_products(self, current_product_ids=None, category=None, limit=5):
+        """IR: Get product recommendations for upsell/cross-sell"""
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            
+            # Simple recommendation: products in same category or popular products
+            if category:
+                query = """
+                    SELECT * FROM products 
+                    WHERE category = %s AND stock_quantity > 0
+                """
+                params = [category]
+                
+                if current_product_ids:
+                    placeholders = ','.join(['%s'] * len(current_product_ids))
+                    query += f" AND id NOT IN ({placeholders})"
+                    params.extend(current_product_ids)
+                
+                query += " ORDER BY stock_quantity DESC LIMIT %s"
+                params.append(limit)
+            else:
+                # Fallback: most popular products (by stock as proxy)
+                query = """
+                    SELECT * FROM products 
+                    WHERE stock_quantity > 0
+                """
+                params = []
+                
+                if current_product_ids:
+                    placeholders = ','.join(['%s'] * len(current_product_ids))
+                    query += f" AND id NOT IN ({placeholders})"
+                    params.extend(current_product_ids)
+                
+                query += " ORDER BY stock_quantity DESC LIMIT %s"
+                params.append(limit)
+            
+            cursor.execute(query, params)
+            return cursor.fetchall()
+        except Error as e:
+            print(f"Error getting product recommendations: {e}")
+            return []
+    
+    def track_user_behavior(self, session_id, event_type, event_data=None, page_url=None, user_id=None):
+        """Track user behavior for NLP abandonment analysis"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO user_behavior (session_id, user_id, event_type, event_data, page_url)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (session_id, user_id, event_type, json.dumps(event_data) if event_data else None, page_url))
+            return cursor.lastrowid
+        except Error as e:
+            print(f"Error tracking user behavior: {e}")
+            return None
+    
+    def get_user_behavior_pattern(self, session_id, hours_back=24):
+        """Get user behavior pattern for NLP analysis"""
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT * FROM user_behavior 
+                WHERE session_id = %s 
+                AND timestamp > NOW() - INTERVAL %s HOUR
+                ORDER BY timestamp ASC
+            """, (session_id, hours_back))
+            return cursor.fetchall()
+        except Error as e:
+            print(f"Error getting behavior pattern: {e}")
+            return []
+    
+    def create_user_preferences(self, user_id, email_notifications=True, marketing_emails=True, data_processing_consent=True):
+        """Create user preferences for GDPR compliance"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO user_preferences (user_id, email_notifications, marketing_emails, data_processing_consent)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                email_notifications = VALUES(email_notifications),
+                marketing_emails = VALUES(marketing_emails),
+                data_processing_consent = VALUES(data_processing_consent)
+            """, (user_id, email_notifications, marketing_emails, data_processing_consent))
+            return cursor.lastrowid
+        except Error as e:
+            print(f"Error creating user preferences: {e}")
+            return None
+    
+    def delete_user_data(self, user_id, keep_anonymous=True):
+        """GDPR: Delete or anonymize user data"""
+        try:
+            cursor = self.connection.cursor()
+            
+            if keep_anonymous:
+                # Anonymize rather than delete (preserves analytics)
+                cursor.execute("""
+                    UPDATE users SET 
+                    email = CONCAT('deleted_user_', id, '@anonymous.local'),
+                    first_name = 'Deleted',
+                    last_name = 'User',
+                    password_hash = 'DELETED',
+                    is_active = FALSE
+                    WHERE id = %s
+                """, (user_id,))
+                
+                # Update shopping carts to remove user association
+                cursor.execute("""
+                    UPDATE shopping_carts SET user_id = NULL WHERE user_id = %s
+                """, (user_id,))
+            else:
+                # Full deletion (cascades to related tables)
+                cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            
+            return True
+        except Error as e:
+            print(f"Error deleting user data: {e}")
+            return False
     
     def close(self):
         if self.connection:

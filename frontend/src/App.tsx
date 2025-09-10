@@ -1,4 +1,3 @@
-import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { CartProvider } from './context/CartContext';
 import { AuthProvider } from './context/AuthContext';
@@ -12,11 +11,6 @@ import AbandonmentPopup from './components/AbandonmentPopup';
 import ChatWidget from './components/ChatWidget';
 
 function App() {
-  // Generate a unique session ID for the chat
-  const sessionId = React.useMemo(() => {
-    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }, []);
-
   return (
     <AuthProvider>
       <CartProvider>
@@ -33,9 +27,7 @@ function App() {
               </Routes>
             </main>
             <AbandonmentPopup />
-            <ChatWidget 
-              sessionId={sessionId}
-            />
+            <ChatWidget />
           </div>
         </Router>
       </CartProvider>
